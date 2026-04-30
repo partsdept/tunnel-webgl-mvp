@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Portal WebGL MVP</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+  }
+  #info {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #info b { color: #fff; }
+  #fps { color: #8f8; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="info">
+  <b>Portal WebGL MVP</b><br>
+  TAB: cycle mode &nbsp; F: fullscreen &nbsp; R: reset camera<br>
+  Drag: orbit &nbsp; Wheel: zoom<br>
+  <span id="fps">– fps</span> &nbsp; <span id="mode">UNROLLED</span> &nbsp; <span id="canvas-size"></span>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/addons/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const UNROLLED_W = 8640;
+const UNROLLED_H = 3840;
+const PLATE_W = 7680;
+const PLATE_H = 4320;
+
+const CANVAS_COLS = 8;
+const CANVAS_ROWS = 2;
+
+// ============================================================
+// PANEL GEOMETRY (embedded from tunnel_geometry.json)
+// ============================================================
+
+const PANELS = [
+  { name: "RT1.B", corners: [[859.74,1794.82,32.37],[859.74,1794.82,1477.67],[73.73,1987.15,1477.67],[73.73,1987.15,32.37]] },
+  { name: "RT1.F", corners: [[859.74,1794.82,-1477.67],[859.74,1794.82,-32.37],[73.73,1987.15,-32.37],[73.73,1987.15,-1477.67]] },
+  { name: "RT2.B", corners: [[1591.35,1195.04,32.37],[1591.35,1195.04,1477.67],[982.96,1728.58,1477.67],[982.96,1728.58,32.37]] },
+  { name: "RT2.F", corners: [[1591.35,1195.04,-1477.67],[1591.35,1195.04,-32.37],[982.96,1728.58,-32.37],[982.96,1728.58,-1477.67]] },
+  { name: "RB1.B", corners: [[1963.35,325.21,32.37],[1963.35,325.21,1477.67],[1670.07,1079.39,1477.67],[1670.07,1079.39,32.37]] },
+  { name: "RB1.F", corners: [[1963.35,325.21,-1477.67],[1963.35,325.21,-32.37],[1670.07,1079.39,-32.37],[1670.07,1079.39,-1477.67]] },
+  { name: "RB2.B", corners: [[1891.68,-618.11,32.37],[1891.68,-618.11,1477.67],[1979.77,186.28,1477.67],[1979.77,186.28,32.37]] },
+  { name: "RB2.F", corners: [[1891.68,-618.11,-1477.67],[1891.68,-618.11,-32.37],[1979.77,186.28,-32.37],[1979.77,186.28,-1477.67]] },
+  { name: "LB2.B", corners: [[-1979.77,186.28,32.37],[-1979.77,186.28,1477.67],[-1891.68,-618.11,1477.67],[-1891.68,-618.11,32.37]] },
+  { name: "LB2.F", corners: [[-1979.77,186.28,-1477.67],[-1979.77,186.28,-32.37],[-1891.68,-618.11,-32.37],[-1891.68,-618.11,-1477.67]] },
+  { name: "LB1.B", corners: [[-1670.07,1079.39,32.37],[-1670.07,1079.39,1477.67],[-1963.35,325.21,1477.67],[-1963.35,325.21,32.37]] },
+  { name: "LB1.F", corners: [[-1670.07,1079.39,-1477.67],[-1670.07,1079.39,-32.37],[-1963.35,325.21,-32.37],[-1963.35,325.21,-1477.67]] },
+  { name: "LT2.B", corners: [[-982.96,1728.58,32.37],[-982.96,1728.58,1477.67],[-1591.35,1195.04,1477.67],[-1591.35,1195.04,32.37]] },
+  { name: "LT2.F", corners: [[-982.96,1728.58,-1477.67],[-982.96,1728.58,-32.37],[-1591.35,1195.04,-32.37],[-1591.35,1195.04,-1477.67]] },
+  { name: "LT1.B", corners: [[-73.73,1987.15,32.37],[-73.73,1987.15,1477.67],[-859.74,1794.82,1477.67],[-859.74,1794.82,32.37]] },
+  { name: "LT1.F", corners: [[-73.73,1987.15,-1477.67],[-73.73,1987.15,-32.37],[-859.74,1794.82,-32.37],[-859.74,1794.82,-1477.67]] },
+];
+
+const PANEL_TO_CELL = {
+  "LT1.F": [0, 0], "LT1.B": [1, 0],
+  "LT2.F": [0, 1], "LT2.B": [1, 1],
+  "LB1.F": [0, 2], "LB1.B": [1, 2],
+  "LB2.F": [0, 3], "LB2.B": [1, 3],
+  "RT1.B": [2, 0], "RT1.F": [3, 0],
+  "RT2.B": [2, 1], "RT2.F": [3, 1],
+  "RB1.B": [2, 2], "RB1.F": [3, 2],
+  "RB2.B": [2, 3], "RB2.F": [3, 3],
+};
+
+// ============================================================
+// SCENE SETUP
+// ============================================================
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000);
+document.body.appendChild(renderer.domElement);
+
+const gl = renderer.getContext();
+const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+const renderer_str = debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : '?';
+console.log("Max texture size:", maxTex);
+console.log("Renderer:", renderer_str);
+document.getElementById('canvas-size').textContent = `MaxTex: ${maxTex} | ${renderer_str}`;
+
+// ============================================================
+// LOAD TEST CARDS
+// ============================================================
+
+const loader = new THREE.TextureLoader();
+const cardPaths = [
+  './assets/test-cards/TestCard_Q1.png',
+  './assets/test-cards/TestCard_Q2.png',
+  './assets/test-cards/TestCard_Q3.png',
+  './assets/test-cards/TestCard_Q4.png',
+];
+
+function loadAll() {
+  return Promise.all(cardPaths.map(p => new Promise((resolve, reject) => {
+    loader.load(p, tex => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      resolve(tex);
+    }, undefined, err => reject(`Failed to load ${p}: ${err}`));
+  })));
+}
+
+// ============================================================
+// PASS 1: UNROLLED CANVAS
+//
+// 16 cells (8 cols × 2 rows). Each cell shows one quadrant of one
+// test card, pre-rotated so the strip-and-rotate transform produces
+// natural-orientation cards on the plate.
+//
+// The rotation flag in the table is the rotation that needs to be
+// applied so that, COMBINED with the strip-and-rotate transform
+// downstream, the final card lands upright.
+// ============================================================
+
+// Layout: [cardIdx, quadrant, useCCWBranch]
+// cardIdx: 0=Q1, 1=Q2, 2=Q3, 3=Q4
+// useCCWBranch: which shader rotation branch to use
+//   - Left half cells (cols 0-3): use CCW shader branch (true)
+//   - Right half cells (cols 4-7): use CW shader branch (false)
+const UNROLLED_LAYOUT = [
+  // Top row
+  [1, 'BL', false], [1, 'TL', false], [0, 'BL', false], [0, 'TL', false],
+  [2, 'TR', true],  [2, 'BR', true],  [3, 'TR', true],  [3, 'BR', true],
+  // Bottom row
+  [1, 'BR', false], [1, 'TR', false], [0, 'BR', false], [0, 'TR', false],
+  [2, 'TL', true],  [2, 'BL', true],  [3, 'TL', true],  [3, 'BL', true],
+];
+
+const CELL_W = UNROLLED_W / CANVAS_COLS;
+const CELL_H = UNROLLED_H / CANVAS_ROWS;
+
+function quadrantUVs(quadrant) {
+  switch (quadrant) {
+    case 'TL': return [0.0, 0.5, 0.5, 1.0];
+    case 'TR': return [0.5, 0.5, 1.0, 1.0];
+    case 'BL': return [0.0, 0.0, 0.5, 0.5];
+    case 'BR': return [0.5, 0.0, 1.0, 0.5];
+  }
+}
+
+function buildUnrolledScene(textures) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(0, UNROLLED_W, UNROLLED_H, 0, -1, 1);
+
+  for (let i = 0; i < 16; i++) {
+    const col = i % CANVAS_COLS;
+    const row = Math.floor(i / CANVAS_COLS);
+    const [cardIdx, quadrant, useCCW] = UNROLLED_LAYOUT[i];
+    const texture = textures[cardIdx];
+    const [uMin, vMin, uMax, vMax] = quadrantUVs(quadrant);
+
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        tex:    { value: texture },
+        uMin:   { value: uMin },
+        vMin:   { value: vMin },
+        uMax:   { value: uMax },
+        vMax:   { value: vMax },
+        rotCCW: { value: useCCW ? 1.0 : 0.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tex;
+        uniform float uMin, vMin, uMax, vMax;
+        uniform float rotCCW;
+        varying vec2 vUv;
+        void main() {
+          float qu, qv;
+          if (rotCCW > 0.5) {
+            qu = vUv.y;
+            qv = 1.0 - vUv.x;
+          } else {
+            qu = 1.0 - vUv.y;
+            qv = vUv.x;
+          }
+          float texU = uMin + (uMax - uMin) * qu;
+          float texV = vMin + (vMax - vMin) * qv;
+          gl_FragColor = texture2D(tex, vec2(texU, texV));
+        }
+      `,
+    });
+
+    const geom = new THREE.PlaneGeometry(CELL_W, CELL_H);
+    const mesh = new THREE.Mesh(geom, mat);
+    const cx = col * CELL_W + CELL_W / 2;
+    const cy = UNROLLED_H - (row * CELL_H + CELL_H / 2);
+    mesh.position.set(cx, cy, 0);
+    scene.add(mesh);
+  }
+
+  return { scene, camera };
+}
+
+// ============================================================
+// PASS 2: STRIP-AND-ROTATE
+// ============================================================
+
+function buildPlateScene(unrolledTexture) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(0, PLATE_W, PLATE_H, 0, -1, 1);
+
+  function makeHalfMesh(uMin, uMax, plateXOffset, rotateCCW) {
+    const geom = new THREE.PlaneGeometry(PLATE_W / 2, PLATE_H);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        tex:     { value: unrolledTexture },
+        uMin:    { value: uMin },
+        uMax:    { value: uMax },
+        rotCCW:  { value: rotateCCW ? 1.0 : 0.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tex;
+        uniform float uMin;
+        uniform float uMax;
+        uniform float rotCCW;
+        varying vec2 vUv;
+        void main() {
+          float su, sv;
+          if (rotCCW > 0.5) {
+            su = 1.0 - vUv.y;
+            sv = vUv.x;
+          } else {
+            su = vUv.y;
+            sv = 1.0 - vUv.x;
+          }
+          float srcU = uMin + (uMax - uMin) * su;
+          float srcV = sv;
+          gl_FragColor = texture2D(tex, vec2(srcU, srcV));
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(plateXOffset + PLATE_W / 4, PLATE_H / 2, 0);
+    return mesh;
+  }
+
+  scene.add(makeHalfMesh(0.0, 0.5, 0, false));
+  scene.add(makeHalfMesh(0.5, 1.0, PLATE_W / 2, true));
+
+  return { scene, camera };
+}
+
+// ============================================================
+// LETTERBOXED OUTPUT
+// ============================================================
+
+function buildLetterboxedScene(texture, contentW, contentH) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      tex:           { value: texture },
+      contentAspect: { value: contentW / contentH },
+      windowAspect:  { value: 1.0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D tex;
+      uniform float contentAspect;
+      uniform float windowAspect;
+      varying vec2 vUv;
+      void main() {
+        vec2 scale;
+        if (windowAspect > contentAspect) {
+          scale = vec2(contentAspect / windowAspect, 1.0);
+        } else {
+          scale = vec2(1.0, windowAspect / contentAspect);
+        }
+        vec2 centered = (vUv - 0.5) / scale + 0.5;
+        if (centered.x < 0.0 || centered.x > 1.0 || centered.y < 0.0 || centered.y > 1.0) {
+          gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        } else {
+          gl_FragColor = texture2D(tex, centered);
+        }
+      }
+    `,
+  });
+  const geom = new THREE.PlaneGeometry(2, 2);
+  scene.add(new THREE.Mesh(geom, mat));
+
+  return { scene, camera, material: mat };
+}
+
+// ============================================================
+// 3D ARCH PREVIEW
+// ============================================================
+
+function buildArchScene(plateTexture) {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x202020);
+
+  const camera = new THREE.PerspectiveCamera(50, 1, 100, 50000);
+  camera.position.set(0, 1500, 7000);
+  camera.lookAt(0, 800, 0);
+
+  const grid = new THREE.GridHelper(6000, 12, 0x444444, 0x222222);
+  grid.position.y = -700;
+  scene.add(grid);
+
+  const axes = new THREE.AxesHelper(800);
+  scene.add(axes);
+
+  for (const panel of PANELS) {
+    const cell = PANEL_TO_CELL[panel.name];
+    if (!cell) continue;
+    const [col, row] = cell;
+
+    const uMin = col / 4;
+    const uMax = (col + 1) / 4;
+    const vMin = 1 - (row + 1) / 4;
+    const vMax = 1 - row / 4;
+
+    const c = panel.corners;
+    const positions = new Float32Array([
+      c[0][0], c[0][1], c[0][2],
+      c[1][0], c[1][1], c[1][2],
+      c[2][0], c[2][1], c[2][2],
+      c[3][0], c[3][1], c[3][2],
+    ]);
+    // Left-side panels (L*) need their UVs rotated 180° in the
+    // texture sample to match physical orientation. Right-side panels
+    // use the natural mapping.
+    const isLeftSide = panel.name.startsWith('L');
+    const uvs = isLeftSide
+      ? new Float32Array([
+          uMax, vMax,
+          uMin, vMax,
+          uMin, vMin,
+          uMax, vMin,
+        ])
+      : new Float32Array([
+          uMin, vMin,
+          uMax, vMin,
+          uMax, vMax,
+          uMin, vMax,
+        ]);
+    const indices = [0, 1, 2,  0, 2, 3];
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+
+    const mat = new THREE.MeshBasicMaterial({
+      map: plateTexture,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.userData.panelName = panel.name;
+    scene.add(mesh);
+  }
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 800, 0);
+  controls.update();
+  controls.enabled = false;
+
+  return { scene, camera, controls };
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+
+let unrolledTarget, plateTarget;
+let unrolledPass, platePass, flatScene, unrolledViewScene, archScene;
+const MODES = ['flat', 'unrolled', 'arch'];
+let currentModeIdx = 1;  // default to unrolled view
+let frameCount = 0;
+let lastFpsUpdate = performance.now();
+let archControls;
+
+async function init() {
+  const textures = await loadAll();
+
+  unrolledTarget = new THREE.WebGLRenderTarget(UNROLLED_W, UNROLLED_H, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.UnsignedByteType,
+    colorSpace: THREE.SRGBColorSpace,
+  });
+  plateTarget = new THREE.WebGLRenderTarget(PLATE_W, PLATE_H, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.UnsignedByteType,
+    colorSpace: THREE.SRGBColorSpace,
+  });
+
+  unrolledPass = buildUnrolledScene(textures);
+  platePass = buildPlateScene(unrolledTarget.texture);
+  flatScene = buildLetterboxedScene(plateTarget.texture, PLATE_W, PLATE_H);
+  unrolledViewScene = buildLetterboxedScene(unrolledTarget.texture, UNROLLED_W, UNROLLED_H);
+  const archResult = buildArchScene(plateTarget.texture);
+  archScene = archResult;
+  archControls = archResult.controls;
+
+  setupHotkeys();
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const windowAspect = window.innerWidth / window.innerHeight;
+  flatScene.material.uniforms.windowAspect.value = windowAspect;
+  unrolledViewScene.material.uniforms.windowAspect.value = windowAspect;
+
+  renderer.setRenderTarget(unrolledTarget);
+  renderer.render(unrolledPass.scene, unrolledPass.camera);
+  renderer.setRenderTarget(plateTarget);
+  renderer.render(platePass.scene, platePass.camera);
+
+  renderer.setRenderTarget(null);
+  const mode = MODES[currentModeIdx];
+  if (mode === 'flat') {
+    renderer.render(flatScene.scene, flatScene.camera);
+  } else if (mode === 'unrolled') {
+    renderer.render(unrolledViewScene.scene, unrolledViewScene.camera);
+  } else {
+    archControls.update();
+    renderer.render(archScene.scene, archScene.camera);
+  }
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsUpdate > 500) {
+    const fps = (frameCount * 1000 / (now - lastFpsUpdate)).toFixed(1);
+    document.getElementById('fps').textContent = `${fps} fps`;
+    frameCount = 0;
+    lastFpsUpdate = now;
+  }
+}
+
+function setupHotkeys() {
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      currentModeIdx = (currentModeIdx + 1) % MODES.length;
+      const mode = MODES[currentModeIdx];
+      archControls.enabled = (mode === 'arch');
+      document.getElementById('mode').textContent = mode.toUpperCase();
+    } else if (e.key === 'f' || e.key === 'F') {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen();
+      } else {
+        document.exitFullscreen();
+      }
+    } else if (e.key === 'r' || e.key === 'R') {
+      if (archScene && archControls) {
+        archScene.camera.position.set(0, 1500, 7000);
+        archControls.target.set(0, 800, 0);
+        archControls.update();
+      }
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    if (archScene && archScene.camera) {
+      archScene.camera.aspect = window.innerWidth / window.innerHeight;
+      archScene.camera.updateProjectionMatrix();
+    }
+  });
+}
+
+init().catch(err => {
+  document.getElementById('info').innerHTML = `<b>Error:</b> ${err}`;
+  console.error(err);
+});
+</script>
+</body>
+</html>
