@@ -31,6 +31,8 @@
   #fps { color: #8f8; }
   .layer-on { color: #8f8; }
   .layer-off { color: #555; }
+  .osc-on { color: #8f8; }
+  .osc-off { color: #555; }
   canvas { display: block; }
 </style>
 </head>
@@ -44,7 +46,7 @@
           <span id="layer-p" class="layer-off">P</span>
           <span id="layer-m" class="layer-off">M</span>
           (B/N: bg+cycle, Q/3/P/M: toggle)<br>
-  <span id="fps">– fps</span> &nbsp; <span id="mode">UNROLLED</span> &nbsp; <span id="canvas-size"></span>
+  <span id="fps">– fps</span> &nbsp; <span id="mode">UNROLLED</span> &nbsp; <span id="osc-status" class="osc-off">OSC ○</span> &nbsp; <span id="canvas-size"></span>
 </div>
 
 <script type="importmap">
@@ -111,7 +113,7 @@ const PANEL_TO_CELL = {
 // ============================================================
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(1);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000);
 renderer.autoClear = false;  // we manage clearing manually for layered rendering
@@ -300,37 +302,43 @@ function buildTestCardsLayer(textures) {
 function buildOrbitLayer() {
   const scene = new THREE.Scene();
 
-  // Perspective camera. Aspect matches the unrolled canvas (8640/3840 = 2.25).
-  // Position along +Z, looking at origin.
+  // Perspective camera centered on the canvas. We position the camera
+  // looking down at the canvas's center (UNROLLED_W/2, UNROLLED_H/2)
+  // from a distance that makes the canvas extent fit the frustum.
+  // Shapes orbit at radii constrained to the canvas extent so they
+  // never wander outside the unrolled-canvas region.
   const aspect = UNROLLED_W / UNROLLED_H;
-  const camera = new THREE.PerspectiveCamera(40, aspect, 100, 50000);
-  camera.position.set(0, 0, 5500);
-  camera.lookAt(0, 0, 0);
+  const fov = 40;  // degrees
+  // At distance d, the visible vertical extent at the focal plane is
+  // 2 * d * tan(fov/2). We want this to equal UNROLLED_H so shapes
+  // orbiting at canvas-extent radii stay in frame.
+  const distance = (UNROLLED_H / 2) / Math.tan((fov / 2) * Math.PI / 180);
+  const camera = new THREE.PerspectiveCamera(fov, aspect, 100, distance * 3);
+  camera.position.set(UNROLLED_W / 2, UNROLLED_H / 2, distance);
+  camera.lookAt(UNROLLED_W / 2, UNROLLED_H / 2, 0);
 
   // Lighting
   scene.add(new THREE.AmbientLight(0xffffff, 0.4));
   const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-  dir.position.set(2000, 1500, 3000);
+  dir.position.set(UNROLLED_W * 0.7, UNROLLED_H * 0.8, distance * 0.6);
   scene.add(dir);
 
-  // Define orbital parameters per shape.
-  // The "apex" of the arch corresponds to the canvas's horizontal centerline,
-  // so orbits are mostly horizontal with some vertical/depth wobble.
+  // Orbit radii constrained to the canvas extent (smaller than W/2 to
+  // keep shapes safely inside).
+  const maxRadius = UNROLLED_W * 0.42;
   const shapes = [
-    { color: 0xff5050, radius: 3500, speed: 0.3, phase: 0,        size: 250 },
-    { color: 0x50ff80, radius: 3000, speed: 0.45, phase: 1.2,     size: 200 },
-    { color: 0x5080ff, radius: 3800, speed: 0.25, phase: 2.4,     size: 280 },
-    { color: 0xffe040, radius: 2500, speed: 0.6, phase: 3.6,      size: 180 },
-    { color: 0xff80ff, radius: 4000, speed: 0.2, phase: 5.0,      size: 220 },
+    { color: 0xff5050, radius: maxRadius * 0.85, speed: 0.3,  phase: 0,    size: 250 },
+    { color: 0x50ff80, radius: maxRadius * 0.70, speed: 0.45, phase: 1.2,  size: 200 },
+    { color: 0x5080ff, radius: maxRadius * 0.92, speed: 0.25, phase: 2.4,  size: 280 },
+    { color: 0xffe040, radius: maxRadius * 0.55, speed: 0.6,  phase: 3.6,  size: 180 },
+    { color: 0xff80ff, radius: maxRadius * 0.98, speed: 0.2,  phase: 5.0,  size: 220 },
   ];
 
   const meshes = [];
   for (const s of shapes) {
     const geom = new THREE.SphereGeometry(s.size, 32, 24);
     const mat = new THREE.MeshStandardMaterial({
-      color: s.color,
-      roughness: 0.4,
-      metalness: 0.2,
+      color: s.color, roughness: 0.4, metalness: 0.2,
     });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.userData = s;
@@ -342,16 +350,20 @@ function buildOrbitLayer() {
   const cubeGeom = new THREE.BoxGeometry(400, 400, 400);
   const cubeMat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.6 });
   const cube = new THREE.Mesh(cubeGeom, cubeMat);
+  cube.position.set(UNROLLED_W / 2, UNROLLED_H / 2, 0);
   scene.add(cube);
+
+  // Wobble bounds also constrained to canvas extent
+  const verticalWobble = UNROLLED_H * 0.15;
+  const depthWobble = 800;
 
   function update(t) {
     for (const mesh of meshes) {
       const s = mesh.userData;
       const angle = t * s.speed + s.phase;
-      // Horizontal orbit (apex circulation), with vertical wobble and depth variation
-      mesh.position.x = Math.cos(angle) * s.radius;
-      mesh.position.y = Math.sin(angle * 1.3) * 600;  // small vertical wobble
-      mesh.position.z = Math.sin(angle) * 800;         // depth variation
+      mesh.position.x = UNROLLED_W / 2 + Math.cos(angle) * s.radius;
+      mesh.position.y = UNROLLED_H / 2 + Math.sin(angle * 1.3) * verticalWobble;
+      mesh.position.z = Math.sin(angle) * depthWobble;
     }
     cube.rotation.x = t * 0.5;
     cube.rotation.y = t * 0.7;
@@ -367,25 +379,26 @@ function buildOrbitLayer() {
 
 function buildParticleLayer() {
   const scene = new THREE.Scene();
-  const aspect = UNROLLED_W / UNROLLED_H;
-  // Use orthographic so particles stay flat against the canvas
+  // Orthographic camera constrained to the canvas's coordinate system
+  // (0..UNROLLED_W, 0..UNROLLED_H). Particles that drift beyond the
+  // canvas extent get clipped by the camera frustum and disappear,
+  // rather than rendering into the canvas at out-of-range coordinates.
   const camera = new THREE.OrthographicCamera(
-    -UNROLLED_W / 2, UNROLLED_W / 2,
-    UNROLLED_H / 2, -UNROLLED_H / 2,
+    0, UNROLLED_W,
+    UNROLLED_H, 0,
     -1000, 1000
   );
 
   const PARTICLE_COUNT = 80;
   const CONNECTION_DIST = 1200;
 
-  // Particle state
+  // Particle state — initialized in canvas-coordinate space (0..W, 0..H)
   const positions = new Float32Array(PARTICLE_COUNT * 3);
   const velocities = new Float32Array(PARTICLE_COUNT * 3);
   for (let i = 0; i < PARTICLE_COUNT; i++) {
-    positions[i*3 + 0] = (Math.random() - 0.5) * UNROLLED_W * 0.95;
-    positions[i*3 + 1] = (Math.random() - 0.5) * UNROLLED_H * 0.95;
+    positions[i*3 + 0] = Math.random() * UNROLLED_W;
+    positions[i*3 + 1] = Math.random() * UNROLLED_H;
     positions[i*3 + 2] = 0;
-    // Velocities in canvas units per second
     velocities[i*3 + 0] = (Math.random() - 0.5) * 200;
     velocities[i*3 + 1] = (Math.random() - 0.5) * 200;
     velocities[i*3 + 2] = 0;
@@ -420,6 +433,19 @@ function buildParticleLayer() {
   scene.add(lines);
 
   let lastTime = performance.now();
+
+  function reset() {
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      positions[i*3 + 0] = Math.random() * UNROLLED_W;
+      positions[i*3 + 1] = Math.random() * UNROLLED_H;
+      positions[i*3 + 2] = 0;
+      velocities[i*3 + 0] = (Math.random() - 0.5) * 200;
+      velocities[i*3 + 1] = (Math.random() - 0.5) * 200;
+      velocities[i*3 + 2] = 0;
+    }
+    pointsGeom.attributes.position.needsUpdate = true;
+    lastTime = performance.now();
+  }
 
   function update(t) {
     const now = performance.now();
@@ -466,7 +492,7 @@ function buildParticleLayer() {
     linesGeom.attributes.color.needsUpdate = true;
   }
 
-  return { scene, camera, update };
+  return { scene, camera, update, reset };
 }
 
 // ============================================================
@@ -759,6 +785,7 @@ async function init() {
   archControls = archResult.controls;
 
   setupHotkeys();
+  connectOsc();
   animate();
 }
 
@@ -820,11 +847,20 @@ function animate() {
     renderer.render(archScene.scene, archScene.camera);
   }
 
-  // Issue a tiny GPU read to force the GPU to actually execute the
-  // submitted commands. Without this, performance.now() only measures
-  // CPU command submission and underreports the true compute time.
+  // Issue a GPU fence and wait for it (briefly) so performance.now()
+  // reflects GPU completion, not just CPU submission. We use a tiny
+  // timeout (1ms) to keep the measurement honest without blocking
+  // longer than we'd like. If the GPU isn't done in 1ms, we under-
+  // measure but don't stall — acceptable for a benchmark display.
   const gl2 = renderer.getContext();
-  gl2.flush();
+  if (gl2.fenceSync) {
+    const fence = gl2.fenceSync(gl2.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl2.flush();
+    gl2.clientWaitSync(fence, 0, 1_000_000);  // wait up to 1ms (in nanoseconds)
+    gl2.deleteSync(fence);
+  } else {
+    gl2.flush();
+  }
   const computeEnd = performance.now();
   computeTimeAccumMs += (computeEnd - computeStart);
   computeTimeSamples++;
@@ -851,61 +887,163 @@ function updateLayerLabels() {
   }
 }
 
-function setupHotkeys() {
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      currentModeIdx = (currentModeIdx + 1) % MODES.length;
-      const mode = MODES[currentModeIdx];
-      archControls.enabled = (mode === 'arch');
-      document.getElementById('mode').textContent = mode.toUpperCase();
-    } else if (e.key === 'q' || e.key === 'Q') {
+// ============================================================
+// OSC CLIENT (via WebSocket bridge)
+// Connects to the bridge at ws://localhost:9001 (the bridge listens
+// for OSC on UDP 9000 and forwards to this WebSocket as JSON).
+// Auto-reconnects if the bridge isn't running yet.
+// ============================================================
+
+const OSC_WS_URL = `ws://${location.hostname || 'localhost'}:9001`;
+let oscSocket = null;
+let oscReconnectTimer = null;
+
+function setOscStatus(connected) {
+  const el = document.getElementById('osc-status');
+  if (!el) return;
+  if (connected) {
+    el.textContent = 'OSC ●';
+    el.className = 'osc-on';
+  } else {
+    el.textContent = 'OSC ○';
+    el.className = 'osc-off';
+  }
+}
+
+function connectOsc() {
+  try {
+    oscSocket = new WebSocket(OSC_WS_URL);
+  } catch (err) {
+    scheduleOscReconnect();
+    return;
+  }
+
+  oscSocket.addEventListener('open', () => {
+    console.log(`[osc] connected to ${OSC_WS_URL}`);
+    setOscStatus(true);
+  });
+
+  oscSocket.addEventListener('message', (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'osc') handleOscMessage(msg.address, msg.args);
+    } catch (err) {
+      console.warn('[osc] bad message:', evt.data);
+    }
+  });
+
+  oscSocket.addEventListener('close', () => {
+    setOscStatus(false);
+    scheduleOscReconnect();
+  });
+
+  oscSocket.addEventListener('error', () => {
+    // 'close' will follow; reconnection is handled there
+  });
+}
+
+function scheduleOscReconnect() {
+  if (oscReconnectTimer) return;
+  oscReconnectTimer = setTimeout(() => {
+    oscReconnectTimer = null;
+    connectOsc();
+  }, 2000);
+}
+
+function handleOscMessage(address, args) {
+  // Match the Unity OSC contract: /portal/keystroke with one string arg
+  // representing the key name. Forwards to the same handler as keyboard.
+  if (address === '/portal/keystroke' && args.length > 0) {
+    const key = String(args[0]);
+    console.log(`[osc] keystroke: ${key}`);
+    handleKeystroke(key);
+  } else {
+    console.log(`[osc] (unhandled) ${address} ${JSON.stringify(args)}`);
+  }
+}
+
+// ============================================================
+// KEYSTROKE DISPATCH
+// Single entry point for both keyboard input and incoming OSC.
+// Adding a new hotkey here automatically makes it OSC-controllable.
+// ============================================================
+
+function handleKeystroke(key) {
+  // Normalize: accept 'Tab', 'q', 'Q', etc. Use single canonical lower-case
+  // for letters; preserve 'Tab' and digit keys.
+  if (key === 'Tab') {
+    currentModeIdx = (currentModeIdx + 1) % MODES.length;
+    const mode = MODES[currentModeIdx];
+    if (archControls) archControls.enabled = (mode === 'arch');
+    document.getElementById('mode').textContent = mode.toUpperCase();
+    return;
+  }
+  const k = key.length === 1 ? key.toLowerCase() : key;
+  switch (k) {
+    case 'q':
       layers.Q = !layers.Q;
-      if (layers.Q) layers.B = false;  // Q and B are mutually exclusive
+      if (layers.Q) layers.B = false;  // Q and B mutually exclusive
       updateLayerLabels();
-    } else if (e.key === '3') {
+      break;
+    case '3':
       layers['3'] = !layers['3'];
       updateLayerLabels();
-    } else if (e.key === 'p' || e.key === 'P') {
+      break;
+    case 'p':
       layers.P = !layers.P;
+      if (layers.P && particleLayer) particleLayer.reset();
       updateLayerLabels();
-    } else if (e.key === 'm' || e.key === 'M') {
+      break;
+    case 'm':
       layers.M = !layers.M;
       updateLayerLabels();
-    } else if (e.key === 'b' || e.key === 'B') {
+      break;
+    case 'b':
       layers.B = !layers.B;
-      if (layers.B) layers.Q = false;  // Q and B are mutually exclusive
+      if (layers.B) layers.Q = false;
       updateLayerLabels();
-    } else if (e.key === 'n' || e.key === 'N') {
-      // Cycle to next background, turn B on (and Q off) if not already
+      break;
+    case 'n':
       if (backgroundLayer && backgroundLayer.count() > 0) {
         backgroundLayer.cycle();
         layers.B = true;
         layers.Q = false;
         updateLayerLabels();
       }
-    } else if (e.key === 'f' || e.key === 'F') {
+      break;
+    case 'f':
       if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen();
       } else {
         document.exitFullscreen();
       }
-    } else if (e.key === 'r' || e.key === 'R') {
+      break;
+    case 'r':
       if (archScene && archControls) {
         archScene.camera.position.set(0, 1500, 7000);
         archControls.target.set(0, 800, 0);
         archControls.update();
       }
-    }
+      break;
+  }
+}
+
+function setupHotkeys() {
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') e.preventDefault();
+    handleKeystroke(e.key);
   });
 
   function applyResize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const dpr = window.devicePixelRatio || 1;
 
-    // Fully re-sync the renderer
-    renderer.setPixelRatio(dpr);
+    // Lock pixel ratio to 1. On high-DPR displays (Retina, or some 8K
+    // configurations) macOS reports DPR > 1, which would tell three.js to
+    // allocate a backing buffer larger than the display — causing render
+    // overshoot/cropping issues in fullscreen. We want a 1:1 mapping
+    // between CSS pixels and GPU pixels.
+    renderer.setPixelRatio(1);
     renderer.setSize(w, h, true);
 
     // Defensive: explicitly set canvas style and attribute dimensions
