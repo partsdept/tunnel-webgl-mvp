@@ -29,14 +29,21 @@
   }
   #info b { color: #fff; }
   #fps { color: #8f8; }
+  .layer-on { color: #8f8; }
+  .layer-off { color: #555; }
   canvas { display: block; }
 </style>
 </head>
 <body>
 <div id="info">
   <b>Portal WebGL MVP</b><br>
-  TAB: cycle mode &nbsp; F: fullscreen &nbsp; R: reset camera<br>
-  Drag: orbit &nbsp; Wheel: zoom<br>
+  TAB: cycle view (unrolled/flat/arch) &nbsp; F: fullscreen &nbsp; R: reset camera<br>
+  Layers: <span id="layer-b" class="layer-off">B</span>
+          <span id="layer-q" class="layer-on">Q</span>
+          <span id="layer-3" class="layer-off">3</span>
+          <span id="layer-p" class="layer-off">P</span>
+          <span id="layer-m" class="layer-off">M</span>
+          (B/N: bg+cycle, Q/3/P/M: toggle)<br>
   <span id="fps">– fps</span> &nbsp; <span id="mode">UNROLLED</span> &nbsp; <span id="canvas-size"></span>
 </div>
 
@@ -66,7 +73,7 @@ const CANVAS_COLS = 8;
 const CANVAS_ROWS = 2;
 
 // ============================================================
-// PANEL GEOMETRY (embedded from tunnel_geometry.json)
+// PANEL GEOMETRY
 // ============================================================
 
 const PANELS = [
@@ -89,14 +96,14 @@ const PANELS = [
 ];
 
 const PANEL_TO_CELL = {
-  "LT1.F": [0, 0], "LT1.B": [1, 0],
-  "LT2.F": [0, 1], "LT2.B": [1, 1],
-  "LB1.F": [0, 2], "LB1.B": [1, 2],
-  "LB2.F": [0, 3], "LB2.B": [1, 3],
-  "RT1.B": [2, 0], "RT1.F": [3, 0],
-  "RT2.B": [2, 1], "RT2.F": [3, 1],
-  "RB1.B": [2, 2], "RB1.F": [3, 2],
-  "RB2.B": [2, 3], "RB2.F": [3, 3],
+  "LT1.F": [1, 0], "LT1.B": [0, 0],
+  "LT2.F": [1, 1], "LT2.B": [0, 1],
+  "LB1.F": [1, 2], "LB1.B": [0, 2],
+  "LB2.F": [1, 3], "LB2.B": [0, 3],
+  "RT1.B": [3, 0], "RT1.F": [2, 0],
+  "RT2.B": [3, 1], "RT2.F": [2, 1],
+  "RB1.B": [3, 2], "RB1.F": [2, 2],
+  "RB2.B": [3, 3], "RB2.F": [2, 3],
 };
 
 // ============================================================
@@ -107,6 +114,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000);
+renderer.autoClear = false;  // we manage clearing manually for layered rendering
 document.body.appendChild(renderer.domElement);
 
 const gl = renderer.getContext();
@@ -129,6 +137,14 @@ const cardPaths = [
   './assets/test-cards/TestCard_Q4.png',
 ];
 
+// Background images for the unrolled canvas layer (B).
+// Add more by dropping files in assets/backgrounds/ and listing here.
+const backgroundPaths = [
+  './assets/backgrounds/PCI_SPACE_IMAGES_01.png',
+  './assets/backgrounds/PCI_SPACE_IMAGES_02.png',
+  './assets/backgrounds/PCI_SPACE_IMAGES_03.png',
+];
+
 function loadAll() {
   return Promise.all(cardPaths.map(p => new Promise((resolve, reject) => {
     loader.load(p, tex => {
@@ -140,23 +156,68 @@ function loadAll() {
   })));
 }
 
+function loadBackgrounds() {
+  // Best-effort load. Missing files don't fail the whole startup;
+  // they're filtered out so the app still works without backgrounds.
+  return Promise.all(backgroundPaths.map(p => new Promise((resolve) => {
+    loader.load(p, tex => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      resolve(tex);
+    }, undefined, () => {
+      console.warn(`Background not loaded: ${p}`);
+      resolve(null);
+    });
+  }))).then(results => results.filter(t => t !== null));
+}
+
 // ============================================================
-// PASS 1: UNROLLED CANVAS
-//
-// 16 cells (8 cols × 2 rows). Each cell shows one quadrant of one
-// test card, pre-rotated so the strip-and-rotate transform produces
-// natural-orientation cards on the plate.
-//
-// The rotation flag in the table is the rotation that needs to be
-// applied so that, COMBINED with the strip-and-rotate transform
-// downstream, the final card lands upright.
+// CONTENT LAYER 0: BACKGROUND (B)
+// A single full-canvas image. Cycle through available backgrounds with N.
 // ============================================================
 
-// Layout: [cardIdx, quadrant, useCCWBranch]
-// cardIdx: 0=Q1, 1=Q2, 2=Q3, 3=Q4
-// useCCWBranch: which shader rotation branch to use
-//   - Left half cells (cols 0-3): use CCW shader branch (true)
-//   - Right half cells (cols 4-7): use CW shader branch (false)
+function buildBackgroundLayer(backgrounds) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(0, UNROLLED_W, UNROLLED_H, 0, -1, 1);
+
+  let currentTexture = backgrounds.length > 0 ? backgrounds[0] : null;
+
+  const mat = new THREE.MeshBasicMaterial({
+    map: currentTexture,
+    color: 0xffffff,
+  });
+  const geom = new THREE.PlaneGeometry(UNROLLED_W, UNROLLED_H);
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(UNROLLED_W / 2, UNROLLED_H / 2, -1);  // behind other content
+  scene.add(mesh);
+
+  let currentIndex = 0;
+
+  function setIndex(i) {
+    if (backgrounds.length === 0) return;
+    currentIndex = ((i % backgrounds.length) + backgrounds.length) % backgrounds.length;
+    mat.map = backgrounds[currentIndex];
+    mat.needsUpdate = true;
+  }
+
+  function cycle() {
+    setIndex(currentIndex + 1);
+  }
+
+  function getInfo() {
+    if (backgrounds.length === 0) return '(no backgrounds loaded)';
+    return `${currentIndex + 1}/${backgrounds.length}`;
+  }
+
+  return { scene, camera, cycle, setIndex, getInfo, count: () => backgrounds.length };
+}
+
+// ============================================================
+// CONTENT LAYER 1: TEST CARDS (Q)
+// 16 cells, each one quadrant of one test card, pre-rotated
+// ============================================================
+
 const UNROLLED_LAYOUT = [
   // Top row
   [1, 'BL', false], [1, 'TL', false], [0, 'BL', false], [0, 'TL', false],
@@ -178,7 +239,7 @@ function quadrantUVs(quadrant) {
   }
 }
 
-function buildUnrolledScene(textures) {
+function buildTestCardsLayer(textures) {
   const scene = new THREE.Scene();
   const camera = new THREE.OrthographicCamera(0, UNROLLED_W, UNROLLED_H, 0, -1, 1);
 
@@ -192,10 +253,8 @@ function buildUnrolledScene(textures) {
     const mat = new THREE.ShaderMaterial({
       uniforms: {
         tex:    { value: texture },
-        uMin:   { value: uMin },
-        vMin:   { value: vMin },
-        uMax:   { value: uMax },
-        vMax:   { value: vMax },
+        uMin:   { value: uMin }, vMin: { value: vMin },
+        uMax:   { value: uMax }, vMax: { value: vMax },
         rotCCW: { value: useCCW ? 1.0 : 0.0 },
       },
       vertexShader: `
@@ -207,18 +266,12 @@ function buildUnrolledScene(textures) {
       `,
       fragmentShader: `
         uniform sampler2D tex;
-        uniform float uMin, vMin, uMax, vMax;
-        uniform float rotCCW;
+        uniform float uMin, vMin, uMax, vMax, rotCCW;
         varying vec2 vUv;
         void main() {
           float qu, qv;
-          if (rotCCW > 0.5) {
-            qu = vUv.y;
-            qv = 1.0 - vUv.x;
-          } else {
-            qu = 1.0 - vUv.y;
-            qv = vUv.x;
-          }
+          if (rotCCW > 0.5) { qu = vUv.y;       qv = 1.0 - vUv.x; }
+          else              { qu = 1.0 - vUv.y; qv = vUv.x; }
           float texU = uMin + (uMax - uMin) * qu;
           float texV = vMin + (vMax - vMin) * qv;
           gl_FragColor = texture2D(tex, vec2(texU, texV));
@@ -238,6 +291,265 @@ function buildUnrolledScene(textures) {
 }
 
 // ============================================================
+// CONTENT LAYER 2: ORBITING 3D SHAPES (3)
+// A few colored spheres orbiting the canvas's horizontal centerline.
+// Renders into the unrolled canvas; through strip-and-rotate, the
+// spheres appear to circulate around the apex of the arch.
+// ============================================================
+
+function buildOrbitLayer() {
+  const scene = new THREE.Scene();
+
+  // Perspective camera. Aspect matches the unrolled canvas (8640/3840 = 2.25).
+  // Position along +Z, looking at origin.
+  const aspect = UNROLLED_W / UNROLLED_H;
+  const camera = new THREE.PerspectiveCamera(40, aspect, 100, 50000);
+  camera.position.set(0, 0, 5500);
+  camera.lookAt(0, 0, 0);
+
+  // Lighting
+  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(2000, 1500, 3000);
+  scene.add(dir);
+
+  // Define orbital parameters per shape.
+  // The "apex" of the arch corresponds to the canvas's horizontal centerline,
+  // so orbits are mostly horizontal with some vertical/depth wobble.
+  const shapes = [
+    { color: 0xff5050, radius: 3500, speed: 0.3, phase: 0,        size: 250 },
+    { color: 0x50ff80, radius: 3000, speed: 0.45, phase: 1.2,     size: 200 },
+    { color: 0x5080ff, radius: 3800, speed: 0.25, phase: 2.4,     size: 280 },
+    { color: 0xffe040, radius: 2500, speed: 0.6, phase: 3.6,      size: 180 },
+    { color: 0xff80ff, radius: 4000, speed: 0.2, phase: 5.0,      size: 220 },
+  ];
+
+  const meshes = [];
+  for (const s of shapes) {
+    const geom = new THREE.SphereGeometry(s.size, 32, 24);
+    const mat = new THREE.MeshStandardMaterial({
+      color: s.color,
+      roughness: 0.4,
+      metalness: 0.2,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.userData = s;
+    scene.add(mesh);
+    meshes.push(mesh);
+  }
+
+  // A central reference cube at the canvas origin
+  const cubeGeom = new THREE.BoxGeometry(400, 400, 400);
+  const cubeMat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.6 });
+  const cube = new THREE.Mesh(cubeGeom, cubeMat);
+  scene.add(cube);
+
+  function update(t) {
+    for (const mesh of meshes) {
+      const s = mesh.userData;
+      const angle = t * s.speed + s.phase;
+      // Horizontal orbit (apex circulation), with vertical wobble and depth variation
+      mesh.position.x = Math.cos(angle) * s.radius;
+      mesh.position.y = Math.sin(angle * 1.3) * 600;  // small vertical wobble
+      mesh.position.z = Math.sin(angle) * 800;         // depth variation
+    }
+    cube.rotation.x = t * 0.5;
+    cube.rotation.y = t * 0.7;
+  }
+
+  return { scene, camera, update };
+}
+
+// ============================================================
+// CONTENT LAYER 3: PARTICLE NETWORK (P)
+// Drifting points with lines drawn between nearby pairs.
+// ============================================================
+
+function buildParticleLayer() {
+  const scene = new THREE.Scene();
+  const aspect = UNROLLED_W / UNROLLED_H;
+  // Use orthographic so particles stay flat against the canvas
+  const camera = new THREE.OrthographicCamera(
+    -UNROLLED_W / 2, UNROLLED_W / 2,
+    UNROLLED_H / 2, -UNROLLED_H / 2,
+    -1000, 1000
+  );
+
+  const PARTICLE_COUNT = 80;
+  const CONNECTION_DIST = 1200;
+
+  // Particle state
+  const positions = new Float32Array(PARTICLE_COUNT * 3);
+  const velocities = new Float32Array(PARTICLE_COUNT * 3);
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    positions[i*3 + 0] = (Math.random() - 0.5) * UNROLLED_W * 0.95;
+    positions[i*3 + 1] = (Math.random() - 0.5) * UNROLLED_H * 0.95;
+    positions[i*3 + 2] = 0;
+    // Velocities in canvas units per second
+    velocities[i*3 + 0] = (Math.random() - 0.5) * 200;
+    velocities[i*3 + 1] = (Math.random() - 0.5) * 200;
+    velocities[i*3 + 2] = 0;
+  }
+
+  // Particles as Points
+  const pointsGeom = new THREE.BufferGeometry();
+  pointsGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const pointsMat = new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 30,
+    sizeAttenuation: false,
+    transparent: true,
+    opacity: 0.9,
+  });
+  const points = new THREE.Points(pointsGeom, pointsMat);
+  scene.add(points);
+
+  // Lines (rebuilt each frame based on proximity)
+  const linesGeom = new THREE.BufferGeometry();
+  // Pre-allocate enough space for the worst case (all pairs connected)
+  const maxLineVerts = PARTICLE_COUNT * PARTICLE_COUNT * 2 * 3;
+  const lineVerts = new Float32Array(maxLineVerts);
+  const lineColors = new Float32Array(maxLineVerts / 3 * 4);
+  linesGeom.setAttribute('position', new THREE.BufferAttribute(lineVerts, 3));
+  linesGeom.setAttribute('color', new THREE.BufferAttribute(lineColors, 4));
+  const linesMat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+  });
+  const lines = new THREE.LineSegments(linesGeom, linesMat);
+  scene.add(lines);
+
+  let lastTime = performance.now();
+
+  function update(t) {
+    const now = performance.now();
+    const dt = Math.min((now - lastTime) / 1000, 0.1);  // cap dt to avoid jumps
+    lastTime = now;
+
+    // Drift particles freely (no edge wrapping)
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      positions[i*3+0] += velocities[i*3+0] * dt;
+      positions[i*3+1] += velocities[i*3+1] * dt;
+    }
+    pointsGeom.attributes.position.needsUpdate = true;
+
+    // Build line segments for nearby pairs
+    let lineCount = 0;
+    const maxDist = CONNECTION_DIST;
+    const maxDist2 = maxDist * maxDist;
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      for (let j = i + 1; j < PARTICLE_COUNT; j++) {
+        const dx = positions[i*3+0] - positions[j*3+0];
+        const dy = positions[i*3+1] - positions[j*3+1];
+        const d2 = dx*dx + dy*dy;
+        if (d2 < maxDist2) {
+          const alpha = 1 - Math.sqrt(d2) / maxDist;
+          // First vertex
+          lineVerts[lineCount*6 + 0] = positions[i*3+0];
+          lineVerts[lineCount*6 + 1] = positions[i*3+1];
+          lineVerts[lineCount*6 + 2] = 0;
+          // Second vertex
+          lineVerts[lineCount*6 + 3] = positions[j*3+0];
+          lineVerts[lineCount*6 + 4] = positions[j*3+1];
+          lineVerts[lineCount*6 + 5] = 0;
+          // Colors (RGBA per vertex)
+          lineColors[lineCount*8 + 0] = 1; lineColors[lineCount*8 + 1] = 1;
+          lineColors[lineCount*8 + 2] = 1; lineColors[lineCount*8 + 3] = alpha;
+          lineColors[lineCount*8 + 4] = 1; lineColors[lineCount*8 + 5] = 1;
+          lineColors[lineCount*8 + 6] = 1; lineColors[lineCount*8 + 7] = alpha;
+          lineCount++;
+        }
+      }
+    }
+    linesGeom.setDrawRange(0, lineCount * 2);
+    linesGeom.attributes.position.needsUpdate = true;
+    linesGeom.attributes.color.needsUpdate = true;
+  }
+
+  return { scene, camera, update };
+}
+
+// ============================================================
+// CONTENT LAYER 4: MARKERS (M)
+// Reference geometry on the unrolled canvas:
+//   - Colored corner blocks (TL=red, TR=green, BL=blue, BR=yellow)
+//   - Cell grid lines (8 cols × 2 rows)
+//   - Apex line (horizontal center, where left/right walls meet)
+//   - Tunnel midline (vertical center, mid-tunnel)
+// Useful for authoring content, debugging cell alignment, and
+// teaching the team the canvas's coordinate system.
+// ============================================================
+
+function buildMarkersLayer() {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(0, UNROLLED_W, UNROLLED_H, 0, -1, 1);
+
+  // === BACK: White border outline around the entire unrolled canvas ===
+  // Drawn as four thin rectangles along the canvas edges.
+  const BORDER_THICKNESS = 16;
+  const borderRects = [
+    // Top edge: full width, top of canvas
+    { w: UNROLLED_W, h: BORDER_THICKNESS, x: UNROLLED_W / 2, y: UNROLLED_H - BORDER_THICKNESS / 2 },
+    // Bottom edge: full width, bottom of canvas
+    { w: UNROLLED_W, h: BORDER_THICKNESS, x: UNROLLED_W / 2, y: BORDER_THICKNESS / 2 },
+    // Left edge: full height, left of canvas
+    { w: BORDER_THICKNESS, h: UNROLLED_H, x: BORDER_THICKNESS / 2, y: UNROLLED_H / 2 },
+    // Right edge: full height, right of canvas
+    { w: BORDER_THICKNESS, h: UNROLLED_H, x: UNROLLED_W - BORDER_THICKNESS / 2, y: UNROLLED_H / 2 },
+  ];
+  for (const r of borderRects) {
+    const geom = new THREE.PlaneGeometry(r.w, r.h);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(r.x, r.y, 0);
+    scene.add(mesh);
+  }
+
+  // === MIDDLE: Colored corner markers at the four canvas corners ===
+  // Red TL, Blue TR, Green BL, Yellow BR.
+  // Pushed right into the actual corners (over the white border).
+  const BLOCK_SIZE = 240;
+  const cornerMarkers = [
+    { color: 0xff3030, x: BLOCK_SIZE / 2,                 y: UNROLLED_H - BLOCK_SIZE / 2 },  // TL red
+    { color: 0x3050ff, x: UNROLLED_W - BLOCK_SIZE / 2,    y: UNROLLED_H - BLOCK_SIZE / 2 },  // TR blue
+    { color: 0x30ff30, x: BLOCK_SIZE / 2,                 y: BLOCK_SIZE / 2 },               // BL green
+    { color: 0xffe030, x: UNROLLED_W - BLOCK_SIZE / 2,    y: BLOCK_SIZE / 2 },               // BR yellow
+  ];
+  for (const c of cornerMarkers) {
+    const geom = new THREE.PlaneGeometry(BLOCK_SIZE, BLOCK_SIZE);
+    const mat = new THREE.MeshBasicMaterial({ color: c.color });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(c.x, c.y, 0);
+    scene.add(mesh);
+  }
+
+  // === FRONT: Centerlines as thick rectangles ===
+  // (LineBasicMaterial linewidth doesn't render >1px on macOS WebGL/ANGLE,
+  //  so we use planes instead.)
+  const LINE_THICKNESS = 16;
+
+  // Apex line — horizontal center, cyan
+  {
+    const geom = new THREE.PlaneGeometry(UNROLLED_W, LINE_THICKNESS);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(UNROLLED_W / 2, UNROLLED_H / 2, 0);
+    scene.add(mesh);
+  }
+
+  // Tunnel midline — vertical center, magenta
+  {
+    const geom = new THREE.PlaneGeometry(LINE_THICKNESS, UNROLLED_H);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(UNROLLED_W / 2, UNROLLED_H / 2, 0);
+    scene.add(mesh);
+  }
+
+  return { scene, camera };
+}
+
+// ============================================================
 // PASS 2: STRIP-AND-ROTATE
 // ============================================================
 
@@ -249,10 +561,9 @@ function buildPlateScene(unrolledTexture) {
     const geom = new THREE.PlaneGeometry(PLATE_W / 2, PLATE_H);
     const mat = new THREE.ShaderMaterial({
       uniforms: {
-        tex:     { value: unrolledTexture },
-        uMin:    { value: uMin },
-        uMax:    { value: uMax },
-        rotCCW:  { value: rotateCCW ? 1.0 : 0.0 },
+        tex: { value: unrolledTexture },
+        uMin: { value: uMin }, uMax: { value: uMax },
+        rotCCW: { value: rotateCCW ? 1.0 : 0.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -263,19 +574,12 @@ function buildPlateScene(unrolledTexture) {
       `,
       fragmentShader: `
         uniform sampler2D tex;
-        uniform float uMin;
-        uniform float uMax;
-        uniform float rotCCW;
+        uniform float uMin, uMax, rotCCW;
         varying vec2 vUv;
         void main() {
           float su, sv;
-          if (rotCCW > 0.5) {
-            su = 1.0 - vUv.y;
-            sv = vUv.x;
-          } else {
-            su = vUv.y;
-            sv = 1.0 - vUv.x;
-          }
+          if (rotCCW > 0.5) { su = 1.0 - vUv.y; sv = vUv.x; }
+          else              { su = vUv.y;       sv = 1.0 - vUv.x; }
           float srcU = uMin + (uMax - uMin) * su;
           float srcV = sv;
           gl_FragColor = texture2D(tex, vec2(srcU, srcV));
@@ -303,9 +607,9 @@ function buildLetterboxedScene(texture, contentW, contentH) {
 
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      tex:           { value: texture },
+      tex: { value: texture },
       contentAspect: { value: contentW / contentH },
-      windowAspect:  { value: 1.0 },
+      windowAspect: { value: 1.0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -316,8 +620,7 @@ function buildLetterboxedScene(texture, contentW, contentH) {
     `,
     fragmentShader: `
       uniform sampler2D tex;
-      uniform float contentAspect;
-      uniform float windowAspect;
+      uniform float contentAspect, windowAspect;
       varying vec2 vUv;
       void main() {
         vec2 scale;
@@ -377,24 +680,15 @@ function buildArchScene(plateTexture) {
       c[2][0], c[2][1], c[2][2],
       c[3][0], c[3][1], c[3][2],
     ]);
-    // Left-side panels (L*) need their UVs rotated 180° in the
-    // texture sample to match physical orientation. Right-side panels
-    // use the natural mapping.
     const isLeftSide = panel.name.startsWith('L');
     const uvs = isLeftSide
       ? new Float32Array([
-          uMax, vMax,
-          uMin, vMax,
-          uMin, vMin,
-          uMax, vMin,
+          uMax, vMax, uMin, vMax, uMin, vMin, uMax, vMin,
         ])
       : new Float32Array([
-          uMin, vMin,
-          uMax, vMin,
-          uMax, vMax,
-          uMin, vMax,
+          uMin, vMin, uMax, vMin, uMax, vMax, uMin, vMax,
         ]);
-    const indices = [0, 1, 2,  0, 2, 3];
+    const indices = [0, 1, 2, 0, 2, 3];
 
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -424,32 +718,39 @@ function buildArchScene(plateTexture) {
 // ============================================================
 
 let unrolledTarget, plateTarget;
-let unrolledPass, platePass, flatScene, unrolledViewScene, archScene;
-const MODES = ['flat', 'unrolled', 'arch'];
-let currentModeIdx = 1;  // default to unrolled view
+let backgroundLayer, testCardsLayer, orbitLayer, particleLayer, markersLayer;
+let platePass, flatScene, unrolledViewScene, archScene;
+const MODES = ['unrolled', 'flat', 'arch'];
+let currentModeIdx = 0;
+const layers = { B: false, Q: true, '3': false, P: false, M: false };
 let frameCount = 0;
 let lastFpsUpdate = performance.now();
+let computeTimeAccumMs = 0;       // sum of compute times since last FPS update
+let computeTimeSamples = 0;
 let archControls;
+const startTime = performance.now();
 
 async function init() {
-  const textures = await loadAll();
+  const [textures, backgrounds] = await Promise.all([loadAll(), loadBackgrounds()]);
 
   unrolledTarget = new THREE.WebGLRenderTarget(UNROLLED_W, UNROLLED_H, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-    format: THREE.RGBAFormat,
-    type: THREE.UnsignedByteType,
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
     colorSpace: THREE.SRGBColorSpace,
+    depthBuffer: true,
   });
   plateTarget = new THREE.WebGLRenderTarget(PLATE_W, PLATE_H, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-    format: THREE.RGBAFormat,
-    type: THREE.UnsignedByteType,
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
     colorSpace: THREE.SRGBColorSpace,
   });
 
-  unrolledPass = buildUnrolledScene(textures);
+  backgroundLayer = buildBackgroundLayer(backgrounds);
+  testCardsLayer = buildTestCardsLayer(textures);
+  orbitLayer = buildOrbitLayer();
+  particleLayer = buildParticleLayer();
+  markersLayer = buildMarkersLayer();
+
   platePass = buildPlateScene(unrolledTarget.texture);
   flatScene = buildLetterboxedScene(plateTarget.texture, PLATE_W, PLATE_H);
   unrolledViewScene = buildLetterboxedScene(unrolledTarget.texture, UNROLLED_W, UNROLLED_H);
@@ -464,16 +765,51 @@ async function init() {
 function animate() {
   requestAnimationFrame(animate);
 
+  const t = (performance.now() - startTime) / 1000;
   const windowAspect = window.innerWidth / window.innerHeight;
   flatScene.material.uniforms.windowAspect.value = windowAspect;
   unrolledViewScene.material.uniforms.windowAspect.value = windowAspect;
 
+  const computeStart = performance.now();
+
+  // === Render unrolled canvas with enabled layers ===
+  // Always render into the fixed-size unrolledTarget regardless of window
+  // dimensions, so layered content always lives in canvas-space.
   renderer.setRenderTarget(unrolledTarget);
-  renderer.render(unrolledPass.scene, unrolledPass.camera);
+  renderer.setViewport(0, 0, UNROLLED_W, UNROLLED_H);
+  renderer.clear(true, true, true);
+
+  if (layers.B) {
+    renderer.render(backgroundLayer.scene, backgroundLayer.camera);
+  }
+  if (layers.Q) {
+    renderer.render(testCardsLayer.scene, testCardsLayer.camera);
+  }
+  if (layers['3']) {
+    orbitLayer.update(t);
+    renderer.clearDepth();
+    renderer.render(orbitLayer.scene, orbitLayer.camera);
+  }
+  if (layers.P) {
+    particleLayer.update(t);
+    renderer.clearDepth();
+    renderer.render(particleLayer.scene, particleLayer.camera);
+  }
+  if (layers.M) {
+    renderer.clearDepth();
+    renderer.render(markersLayer.scene, markersLayer.camera);
+  }
+
+  // === Strip-and-rotate to plate ===
   renderer.setRenderTarget(plateTarget);
+  renderer.setViewport(0, 0, PLATE_W, PLATE_H);
+  renderer.clear(true, true, true);
   renderer.render(platePass.scene, platePass.camera);
 
+  // === Render to screen ===
   renderer.setRenderTarget(null);
+  renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+  renderer.clear(true, true, true);
   const mode = MODES[currentModeIdx];
   if (mode === 'flat') {
     renderer.render(flatScene.scene, flatScene.camera);
@@ -484,13 +820,34 @@ function animate() {
     renderer.render(archScene.scene, archScene.camera);
   }
 
+  // Issue a tiny GPU read to force the GPU to actually execute the
+  // submitted commands. Without this, performance.now() only measures
+  // CPU command submission and underreports the true compute time.
+  const gl2 = renderer.getContext();
+  gl2.flush();
+  const computeEnd = performance.now();
+  computeTimeAccumMs += (computeEnd - computeStart);
+  computeTimeSamples++;
+
   frameCount++;
   const now = performance.now();
   if (now - lastFpsUpdate > 500) {
-    const fps = (frameCount * 1000 / (now - lastFpsUpdate)).toFixed(1);
-    document.getElementById('fps').textContent = `${fps} fps`;
+    const fps = (frameCount * 1000 / (now - lastFpsUpdate));
+    const avgComputeMs = computeTimeSamples > 0 ? (computeTimeAccumMs / computeTimeSamples) : 0;
+    const computeFps = avgComputeMs > 0 ? (1000 / avgComputeMs) : 0;
+    document.getElementById('fps').textContent =
+      `${fps.toFixed(1)} fps  (${avgComputeMs.toFixed(1)} ms = ${computeFps.toFixed(0)} fps compute)`;
     frameCount = 0;
     lastFpsUpdate = now;
+    computeTimeAccumMs = 0;
+    computeTimeSamples = 0;
+  }
+}
+
+function updateLayerLabels() {
+  for (const k of ['B', 'Q', '3', 'P', 'M']) {
+    const el = document.getElementById('layer-' + k.toLowerCase());
+    if (el) el.className = layers[k] ? 'layer-on' : 'layer-off';
   }
 }
 
@@ -502,6 +859,31 @@ function setupHotkeys() {
       const mode = MODES[currentModeIdx];
       archControls.enabled = (mode === 'arch');
       document.getElementById('mode').textContent = mode.toUpperCase();
+    } else if (e.key === 'q' || e.key === 'Q') {
+      layers.Q = !layers.Q;
+      if (layers.Q) layers.B = false;  // Q and B are mutually exclusive
+      updateLayerLabels();
+    } else if (e.key === '3') {
+      layers['3'] = !layers['3'];
+      updateLayerLabels();
+    } else if (e.key === 'p' || e.key === 'P') {
+      layers.P = !layers.P;
+      updateLayerLabels();
+    } else if (e.key === 'm' || e.key === 'M') {
+      layers.M = !layers.M;
+      updateLayerLabels();
+    } else if (e.key === 'b' || e.key === 'B') {
+      layers.B = !layers.B;
+      if (layers.B) layers.Q = false;  // Q and B are mutually exclusive
+      updateLayerLabels();
+    } else if (e.key === 'n' || e.key === 'N') {
+      // Cycle to next background, turn B on (and Q off) if not already
+      if (backgroundLayer && backgroundLayer.count() > 0) {
+        backgroundLayer.cycle();
+        layers.B = true;
+        layers.Q = false;
+        updateLayerLabels();
+      }
     } else if (e.key === 'f' || e.key === 'F') {
       if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen();
@@ -517,13 +899,50 @@ function setupHotkeys() {
     }
   });
 
-  window.addEventListener('resize', () => {
-    renderer.setSize(window.innerWidth, window.innerHeight);
+  function applyResize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+
+    // Fully re-sync the renderer
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(w, h, true);
+
+    // Defensive: explicitly set canvas style and attribute dimensions
+    const canvas = renderer.domElement;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+
     if (archScene && archScene.camera) {
-      archScene.camera.aspect = window.innerWidth / window.innerHeight;
+      archScene.camera.aspect = w / h;
       archScene.camera.updateProjectionMatrix();
     }
+    if (flatScene) flatScene.material.uniforms.windowAspect.value = w / h;
+    if (unrolledViewScene) unrolledViewScene.material.uniforms.windowAspect.value = w / h;
+  }
+
+  window.addEventListener('resize', applyResize);
+
+  // Fullscreen transitions can fire 'resize' BEFORE the browser actually
+  // changes the viewport size, and Chrome/Safari finalize their transitions
+  // at different timings. Re-apply at multiple intervals to catch them.
+  document.addEventListener('fullscreenchange', () => {
+    applyResize();
+    requestAnimationFrame(applyResize);
+    setTimeout(applyResize, 50);
+    setTimeout(applyResize, 200);
+    setTimeout(applyResize, 500);
   });
+  document.addEventListener('webkitfullscreenchange', () => {
+    applyResize();
+    requestAnimationFrame(applyResize);
+    setTimeout(applyResize, 50);
+    setTimeout(applyResize, 200);
+    setTimeout(applyResize, 500);
+  });
+
+  // Trigger initial sizing
+  applyResize();
 }
 
 init().catch(err => {
